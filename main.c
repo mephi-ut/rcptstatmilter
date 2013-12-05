@@ -4,6 +4,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
 #include <stdio.h>
@@ -13,13 +15,108 @@
 #include <unistd.h>
 #include <libmilter/mfapi.h>
 #include <syslog.h>
+#include <sqlite3.h>
 
-// === Code ===
+
+// === Global definitions ===
+
+static sqlite3 *db 		= NULL;
+static float threshold_temp	=  0.05;
+static float threshold_reject	= -0.9;
+static float score_k		=  0.1;
+
+// === Code: DB routines ===
+
+struct stats {
+	uint32_t	ipv4addr;
+	float		score;
+	int		tries;
+	char		isnew;
+};
+
+static int stats_get_callback(struct stats *stats_p, int argc, char **argv, char **colname) {
+	int i;
+	i=0;
+	while(i<argc) {
+//		printf("%s: %s\n", colname[i], argv[i]);
+		if(!strcmp(colname[i], "score"))
+			stats_p->score = atof(argv[i]);
+		else
+		if(!strcmp(colname[i], "tries"))
+			stats_p->tries = atoi(argv[i]);
+		i++;
+	}
+
+	stats_p->isnew = 0;
+	return 0;
+}
+
+void stats_get(struct stats *stats_p, uint32_t ipv4address) {
+	char query[BUFSIZ];
+	int rc;
+	char *errmsg = NULL;
+	stats_p->ipv4addr = ipv4address;
+	stats_p->isnew    = 1;
+	sprintf(query, "SELECT ipv4addr, score, tries FROM statmilter_stats WHERE ipv4addr = %i", ipv4address);
+	rc = sqlite3_exec(db, query, (int (*)(void *, int,  char **, char **))stats_get_callback, stats_p, &errmsg);
+	if(rc != SQLITE_OK) {
+		syslog(LOG_CRIT, "Cannot get statistics from DB: %s. Exit.\n", errmsg);
+		exit(EX_SOFTWARE);
+	}
+	return;
+}
+
+void stats_set(struct stats *stats_p) {
+	char query[BUFSIZ];
+	int rc;
+	if(stats_p->isnew) {
+		sprintf(query, "UPDATE statmilter_stats SET score=\"%f\", tries=%u WHERE ipv4addr = %i", 
+			stats_p->score, stats_p->tries, stats_p->ipv4addr);
+	} else {
+		sprintf(query, "INSERT INTO statmilter_stats VALUES(%i, \"%f\", %u)", 
+			stats_p->ipv4addr, stats_p->score, stats_p->tries);
+	}
+
+	sqlite3_stmt *stmt = NULL;
+	rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
+	if(rc != SQLITE_OK) {
+		syslog(LOG_CRIT, "Cannot update statistics in DB. Exit.\n");
+		exit(EX_SOFTWARE);
+	}
+	sqlite3_finalize(stmt);
+	return;
+}
+
+void stats_decrease(struct stats *stats_p) {
+	stats_p->score = stats_p->score + (-1 - stats_p->score) * score_k;
+	return;
+}
+
+void stats_increase(struct stats *stats_p) {
+	stats_p->score = stats_p->score + (+1 - stats_p->score) * score_k;
+	return;
+}
+
+// === Code: milter self ===
 
 extern sfsistat statmilter_cleanup(SMFICTX *, bool);
 
-sfsistat statmilter_connect(SMFICTX *ctx, char *hostname, _SOCK_ADDR *hostaddr) {
-	//syslog(LOG_NOTICE, "New mail from %s.\n", hostname);
+sfsistat statmilter_connect(SMFICTX *ctx, char *hostname, _SOCK_ADDR *_hostaddr) {
+	if(_hostaddr == NULL) {
+		syslog(LOG_NOTICE, "hostaddr is NULL. Skipping this mail. ACCEPT.");
+		return SMFIS_ACCEPT;
+	}
+
+	struct stats *stats_p = malloc(sizeof(struct stats *));
+	smfi_setpriv(ctx, stats_p);
+
+	struct sockaddr_in *hostaddr = (struct sockaddr_in *)_hostaddr;
+	uint32_t ipv4address = hostaddr->sin_addr.s_addr;
+
+	stats_get(stats_p, ipv4address);
+	syslog(LOG_NOTICE, "New connection from %s (id %s). Stats: new == %u; score == %f; tries == %u", 
+		inet_ntoa(hostaddr->sin_addr), smfi_getsymval(ctx, "{i}"), stats_p->isnew, stats_p->score, stats_p->tries);
+
 	return SMFIS_CONTINUE;
 }
 
@@ -32,6 +129,17 @@ sfsistat statmilter_envfrom(SMFICTX *ctx, char **argv) {
 }
 
 sfsistat statmilter_envrcpt(SMFICTX *ctx, char **argv) {
+	char *status_code = smfi_getsymval(ctx, "{rcpt_host}");
+	struct stats *stats_p = smfi_getpriv(ctx);
+
+	if(!strcmp(status_code, "5.1.1"))
+		stats_decrease(stats_p);
+	else
+		stats_increase(stats_p);
+
+	if(stats_p->tries < ((int)~0>>1)-1)
+		stats_p->tries++;
+
 	return SMFIS_CONTINUE;
 }
 
@@ -48,8 +156,6 @@ sfsistat statmilter_body(SMFICTX *ctx, unsigned char *bodyp, size_t bodylen) {
 }
 
 sfsistat statmilter_eom(SMFICTX *ctx) {
-	smfi_addheader(ctx, "X-FromChk-Milter", "passed");
-
 	return SMFIS_CONTINUE;
 }
 
@@ -58,6 +164,13 @@ sfsistat statmilter_abort(SMFICTX *ctx) {
 }
 
 sfsistat statmilter_close(SMFICTX *ctx) {
+	struct stats *stats_p = smfi_getpriv(ctx);
+
+	stats_set(stats_p);
+	syslog(LOG_NOTICE, "Closed connection (id %s). Stats: score == %f; tries == %u", 
+		smfi_getsymval(ctx, "{i}"), stats_p->score, stats_p->tries);
+
+	free(stats_p);
 	return SMFIS_CONTINUE;
 }
 
@@ -66,6 +179,11 @@ sfsistat statmilter_unknown(SMFICTX *ctx, const char *cmd) {
 }
 
 sfsistat statmilter_data(SMFICTX *ctx) {
+	struct stats *stats_p = smfi_getpriv(ctx);
+	
+	if(stats_p->score < threshold_temp)
+		return SMFIS_TEMPFAIL;
+
 	return SMFIS_CONTINUE;
 }
 
@@ -80,11 +198,13 @@ sfsistat statmilter_negotiate(ctx, f0, f1, f2, f3, pf0, pf1, pf2, pf3)
 	unsigned long *pf2;
 	unsigned long *pf3;
 {
-	return SMFIS_ALL_OPTS;
+	*pf0 = f0;
+	*pf1 = SMFIP_RCPT_REJ;
+	return SMFIS_CONTINUE;
 }
 
 static void usage(const char *path) {
-	fprintf(stderr, "Usage: %s -p socket-addr [-t timeout]\n",
+	fprintf(stderr, "Usage: %s -p socket-addr -d db-path [-t timeout]\n",
 		path);
 }
 
@@ -110,7 +230,7 @@ int main(int argc, char *argv[]) {
 
 	char setconn = 0;
 	int c;
-	const char *args = "p:t:h";
+	const char *args = "p:d:t:x:X:k:h";
 	extern char *optarg;
 	// Process command line options
 	while ((c = getopt(argc, argv, args)) != -1) {
@@ -135,6 +255,27 @@ int main(int argc, char *argv[]) {
 					unlink(optarg + 6);
 				setconn = 1;
 				break;
+			case 'd': {
+				// Openning the DB
+				if(sqlite3_open_v2(optarg, &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, NULL)) {
+//				if(sqlite3_open(optarg, &db)) {
+					fprintf(stderr, "Cannot open SQLite3 DB-file \"%s\"\n", optarg);
+					exit(EX_SOFTWARE);
+				}
+
+				// Checking it's validness. Fixing if required.
+				int rc;
+				sqlite3_stmt *stmt = NULL;
+				rc = sqlite3_prepare_v2(db, "SELECT ipv4addr, score, tries FROM statmilter_stats LIMIT 1", -1, &stmt, NULL);
+				if(rc != SQLITE_OK) {
+					// Fixing the table "statmilter_stats"
+					fprintf(stderr, "Invalid DB file \"%s\". Recreating table \"statmilter_stats\" in it.\n", optarg);
+					sqlite3_exec(db, "DROP TABLE statmilter_stats", NULL, NULL, NULL);
+					sqlite3_exec(db, "CREATE TABLE statmilter_stats (ipv4addr INTEGER PRIMARY KEY, score FLOAT, tries INTEGER)", NULL, NULL, NULL);
+				}
+				sqlite3_finalize(stmt);
+				break;
+			}
 			case 't':
 				if (optarg == NULL || *optarg == '\0') {
 					(void)fprintf(stderr, "Illegal timeout: %s\n", 
@@ -147,24 +288,40 @@ int main(int argc, char *argv[]) {
 					exit(EX_SOFTWARE);
 				}
 				break;
+			case 'x':
+				threshold_temp	= atof(optarg);
+				break;
+			case 'X':
+				threshold_reject= atof(optarg);
+				break;
+			case 'k':
+				score_k		= atof(optarg);
+				break;
 			case 'h':
 			default:
 				usage(argv[0]);
 				exit(EX_USAGE);
 		}
 	}
-	if (!setconn) {
+	if(!setconn) {
 		fprintf(stderr, "%s: Missing required -p argument\n", argv[0]);
 		usage(argv[0]);
 		exit(EX_USAGE);
 	}
-	if (smfi_register(mailfilterdesc) == MI_FAILURE) {
+	if(db==NULL) {
+		fprintf(stderr, "%s: Missing required -d argument\n", argv[0]);
+		usage(argv[0]);
+		exit(EX_USAGE);
+	}
+	if(smfi_register(mailfilterdesc) == MI_FAILURE) {
 		fprintf(stderr, "smfi_register failed\n");
 		exit(EX_UNAVAILABLE);
 	}
+
 	openlog(NULL, LOG_PID, LOG_MAIL);
 	int ret = smfi_main();
 	closelog();
+	sqlite3_close(db);
 	return ret;
 }
 

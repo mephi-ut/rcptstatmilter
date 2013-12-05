@@ -1,7 +1,7 @@
 
-LDFLAGS = -lmilter -L/usr/lib/libmilter/
+LDFLAGS = -lmilter $(shell pkg-config --libs sqlite3) -L/usr/lib/libmilter/
 INCFLAGS = 
-CFLAGS += -pipe -Wall -pedantic -O2 -fstack-protector-all
+CFLAGS += -pipe -Wall -pedantic -O2 -fstack-protector-all $(shell pkg-config --cflags sqlite3)
 DEBUGCFLAGS = -pipe -Wall -pedantic -Werror -ggdb -Wno-error=unused-variable -fstack-protector-all
 
 objs=\
