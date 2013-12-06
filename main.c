@@ -21,8 +21,10 @@
 // === Global definitions ===
 
 static sqlite3 *db 		= NULL;
-static float threshold_temp	=  0.05;
+static char learning_only	= 0;
+static float threshold_temp	=  0.25;
 static float threshold_reject	= -0.9;
+static float score_start	=  0.2;
 static float score_k		=  0.1;
 
 // === Code: DB routines ===
@@ -30,8 +32,8 @@ static float score_k		=  0.1;
 struct stats {
 	uint32_t	ipv4addr;
 	float		score;
-	int		tries;
-	char		isnew;
+	uint32_t	tries;
+	uint8_t		isnew;
 };
 
 static int stats_get_callback(struct stats *stats_p, int argc, char **argv, char **colname) {
@@ -56,6 +58,8 @@ void stats_get(struct stats *stats_p, uint32_t ipv4address) {
 	int rc;
 	char *errmsg = NULL;
 	stats_p->ipv4addr = ipv4address;
+	stats_p->score    = score_start;
+	stats_p->tries    = 0;
 	stats_p->isnew    = 1;
 	sprintf(query, "SELECT ipv4addr, score, tries FROM statmilter_stats WHERE ipv4addr = %i", ipv4address);
 	rc = sqlite3_exec(db, query, (int (*)(void *, int,  char **, char **))stats_get_callback, stats_p, &errmsg);
@@ -69,21 +73,23 @@ void stats_get(struct stats *stats_p, uint32_t ipv4address) {
 void stats_set(struct stats *stats_p) {
 	char query[BUFSIZ];
 	int rc;
+	char *errmsg = NULL;
 	if(stats_p->isnew) {
-		sprintf(query, "UPDATE statmilter_stats SET score=\"%f\", tries=%u WHERE ipv4addr = %i", 
-			stats_p->score, stats_p->tries, stats_p->ipv4addr);
-	} else {
 		sprintf(query, "INSERT INTO statmilter_stats VALUES(%i, \"%f\", %u)", 
 			stats_p->ipv4addr, stats_p->score, stats_p->tries);
+	} else {
+		sprintf(query, "UPDATE statmilter_stats SET score=\"%f\", tries=%u WHERE ipv4addr = %i", 
+			stats_p->score, stats_p->tries, stats_p->ipv4addr);
 	}
 
-	sqlite3_stmt *stmt = NULL;
-	rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
+//	sqlite3_stmt *stmt = NULL;
+//	rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
+	rc = sqlite3_exec(db, query, NULL, NULL, &errmsg);
 	if(rc != SQLITE_OK) {
-		syslog(LOG_CRIT, "Cannot update statistics in DB. Exit.\n");
+		syslog(LOG_CRIT, "Cannot update statistics in DB: %s. Exit.\n", errmsg);
 		exit(EX_SOFTWARE);
 	}
-	sqlite3_finalize(stmt);
+//	sqlite3_finalize(stmt);
 	return;
 }
 
@@ -115,7 +121,7 @@ sfsistat statmilter_connect(SMFICTX *ctx, char *hostname, _SOCK_ADDR *_hostaddr)
 
 	stats_get(stats_p, ipv4address);
 	syslog(LOG_NOTICE, "New connection from %s (id %s). Stats: new == %u; score == %f; tries == %u", 
-		inet_ntoa(hostaddr->sin_addr), smfi_getsymval(ctx, "{i}"), stats_p->isnew, stats_p->score, stats_p->tries);
+		inet_ntoa(hostaddr->sin_addr), smfi_getsymval(ctx, "i"), stats_p->isnew, stats_p->score, stats_p->tries);
 
 	return SMFIS_CONTINUE;
 }
@@ -137,8 +143,11 @@ sfsistat statmilter_envrcpt(SMFICTX *ctx, char **argv) {
 	else
 		stats_increase(stats_p);
 
-	if(stats_p->tries < ((int)~0>>1)-1)
+	if(stats_p->tries < ~0)
 		stats_p->tries++;
+
+	syslog(LOG_NOTICE, "Updated stats: new == %u; score == %f; tries == %u", 
+		stats_p->isnew, stats_p->score, stats_p->tries);
 
 	return SMFIS_CONTINUE;
 }
@@ -168,9 +177,10 @@ sfsistat statmilter_close(SMFICTX *ctx) {
 
 	stats_set(stats_p);
 	syslog(LOG_NOTICE, "Closed connection (id %s). Stats: score == %f; tries == %u", 
-		smfi_getsymval(ctx, "{i}"), stats_p->score, stats_p->tries);
+		smfi_getsymval(ctx, "i"), stats_p->score, stats_p->tries);
 
 	free(stats_p);
+	smfi_setpriv(ctx, NULL);
 	return SMFIS_CONTINUE;
 }
 
@@ -180,9 +190,18 @@ sfsistat statmilter_unknown(SMFICTX *ctx, const char *cmd) {
 
 sfsistat statmilter_data(SMFICTX *ctx) {
 	struct stats *stats_p = smfi_getpriv(ctx);
-	
+
+	if(learning_only) {
+		syslog(LOG_NOTICE, "%s: score %f; thres_temp %f; thres_rej %f\n", 
+			smfi_getsymval(ctx, "i"), stats_p->score, threshold_temp, threshold_reject);
+		return SMFIS_CONTINUE;
+	}
+
 	if(stats_p->score < threshold_temp)
 		return SMFIS_TEMPFAIL;
+
+	if(stats_p->score < threshold_reject)
+		return SMFIS_REJECT;
 
 	return SMFIS_CONTINUE;
 }
@@ -228,13 +247,18 @@ int main(int argc, char *argv[]) {
 		statmilter_negotiate		// Once, at the start of each SMTP connection
 	};
 
-	char setconn = 0;
+	learning_only = 0;
+
+	char setconn  = 0;
 	int c;
-	const char *args = "p:d:t:x:X:k:h";
+	const char *args = "lp:d:t:x:X:s:k:h";
 	extern char *optarg;
 	// Process command line options
 	while ((c = getopt(argc, argv, args)) != -1) {
 		switch (c) {
+			case 'l':
+				learning_only = 1;
+				break;
 			case 'p':
 				if (optarg == NULL || *optarg == '\0')
 				{
@@ -293,6 +317,9 @@ int main(int argc, char *argv[]) {
 				break;
 			case 'X':
 				threshold_reject= atof(optarg);
+				break;
+			case 's':
+				score_start	= atof(optarg);
 				break;
 			case 'k':
 				score_k		= atof(optarg);
