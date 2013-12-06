@@ -147,6 +147,8 @@ sfsistat statmilter_envrcpt(SMFICTX *ctx, char **argv) {
 	char *status_code = smfi_getsymval(ctx, "{rcpt_host}");
 	char *mailer      = smfi_getsymval(ctx, "{rcpt_mailer}");
 	struct stats *stats_p = smfi_getpriv(ctx);
+	if(stats_p == NULL)
+		return SMFIS_CONTINUE;
 
 	if(!strcmp(status_code, "5.1.1"))
 		stats_decrease(stats_p);
@@ -187,6 +189,8 @@ sfsistat statmilter_abort(SMFICTX *ctx) {
 
 sfsistat statmilter_close(SMFICTX *ctx) {
 	struct stats *stats_p = smfi_getpriv(ctx);
+	if(stats_p == NULL)
+		return SMFIS_CONTINUE;
 
 	stats_set(stats_p);
 	syslog(LOG_NOTICE, "Closed connection (id %s). Stats: score == %f; tries == %u", 
@@ -203,6 +207,8 @@ sfsistat statmilter_unknown(SMFICTX *ctx, const char *cmd) {
 
 sfsistat statmilter_data(SMFICTX *ctx) {
 	struct stats *stats_p = smfi_getpriv(ctx);
+	if(stats_p == NULL)
+		return SMFIS_CONTINUE;
 
 	if(learning_only) {
 		syslog(LOG_NOTICE, "%s: score %f; thres_temp %f; thres_rej %f\n", 
