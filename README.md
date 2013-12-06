@@ -10,3 +10,5 @@ email until enough amount of good tries.
 I recommend you to run it with "-l" flag for learning, before running without
 "-l".
 
+![Actions graphic](https://raw.github.com/mephi-ut/rcptstatmilter/master/doc/imgs/graph.png)
+
