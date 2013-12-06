@@ -66,8 +66,8 @@ void stats_get(struct stats *stats_p, uint32_t ipv4address) {
 	sprintf(query, "SELECT ipv4addr, score, tries FROM statmilter_stats WHERE ipv4addr = %i", ipv4address);
 	rc = sqlite3_exec(db, query, (int (*)(void *, int,  char **, char **))stats_get_callback, stats_p, &errmsg);
 	if(rc != SQLITE_OK) {
-		syslog(LOG_CRIT, "Cannot get statistics from DB: %s. Exit.\n", errmsg);
-		exit(EX_SOFTWARE);
+		syslog(LOG_CRIT, "Cannot get statistics from DB: %s. Ignoring.\n", errmsg);
+		//exit(EX_SOFTWARE);
 	}
 	return;
 }
