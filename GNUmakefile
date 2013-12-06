@@ -14,6 +14,9 @@ all: $(objs)
 %.o: %.c
 	$(CC) -std=gnu11 $(CFLAGS) $(INCFLAGS) $< -c -o $@
 
+tools:
+	$(CC) $(CFLAGS) $(LDFLAGS) -std=gnu11 rcpt-stat-milter-v2ip.c -o rcpt-stat-milter-v2ip
+
 debug:
 	$(CC) -std=gnu11 $(DEBUGCFLAGS) $(INCFLAGS) $(LDFLAGS) *.c -o rcpt-stat-milter-debug
 
