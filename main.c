@@ -16,16 +16,18 @@
 #include <libmilter/mfapi.h>
 #include <syslog.h>
 #include <sqlite3.h>
+#include <math.h>
 
 
 // === Global definitions ===
 
 static sqlite3 *db 		= NULL;
 static char learning_only	= 0;
-static float threshold_temp	=  0.25;
+static float threshold_temp	=  0.45;
 static float threshold_reject	= -0.9;
-static float score_start	=  0.2;
+static float score_start	=  0.4;
 static float score_k		=  0.1;
+static float slow_down_limit	=  2.72*2.72;
 
 // === Code: DB routines ===
 
@@ -93,14 +95,21 @@ void stats_set(struct stats *stats_p) {
 	return;
 }
 
-void stats_decrease(struct stats *stats_p) {
-	stats_p->score = stats_p->score + (-1 - stats_p->score) * score_k;
-	return;
+void stats_xxcrease(struct stats *stats_p, float side) {
+	float slow_down = logf(stats_p->tries+2);
+
+	if(slow_down > slow_down_limit)
+		slow_down = slow_down_limit;
+
+	stats_p->score = stats_p->score + (side - stats_p->score) * score_k / slow_down;
 }
 
-void stats_increase(struct stats *stats_p) {
-	stats_p->score = stats_p->score + (+1 - stats_p->score) * score_k;
-	return;
+inline void stats_decrease(struct stats *stats_p) {
+	stats_xxcrease(stats_p, -1);
+}
+
+inline void stats_increase(struct stats *stats_p) {
+	stats_xxcrease(stats_p, +1);
 }
 
 // === Code: milter self ===
