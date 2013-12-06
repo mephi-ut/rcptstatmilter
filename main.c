@@ -232,7 +232,7 @@ sfsistat statmilter_negotiate(ctx, f0, f1, f2, f3, pf0, pf1, pf2, pf3)
 }
 
 static void usage(const char *path) {
-	fprintf(stderr, "Usage: %s -p socket-addr -d db-path [-t timeout]\n",
+	fprintf(stderr, "Usage: %s -p socket-addr -d db-path [-t timeout] [-l] [-x temp unavail thresh] [-X reject thresh] [-s score start value] [-k score increase/decrease multiplier]\n",
 		path);
 }
 
