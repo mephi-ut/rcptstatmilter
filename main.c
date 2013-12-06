@@ -145,11 +145,13 @@ sfsistat statmilter_envfrom(SMFICTX *ctx, char **argv) {
 
 sfsistat statmilter_envrcpt(SMFICTX *ctx, char **argv) {
 	char *status_code = smfi_getsymval(ctx, "{rcpt_host}");
+	char *mailer      = smfi_getsymval(ctx, "{rcpt_mailer}");
 	struct stats *stats_p = smfi_getpriv(ctx);
 
 	if(!strcmp(status_code, "5.1.1"))
 		stats_decrease(stats_p);
-	else
+
+	if(!strcmp(mailer, "smtp"))
 		stats_increase(stats_p);
 
 	if(stats_p->tries < ~0)
