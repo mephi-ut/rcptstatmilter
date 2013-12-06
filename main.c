@@ -150,9 +150,11 @@ sfsistat statmilter_envrcpt(SMFICTX *ctx, char **argv) {
 
 	if(!strcmp(status_code, "5.1.1"))
 		stats_decrease(stats_p);
-
+	else
 	if(!strcmp(mailer, "smtp"))
 		stats_increase(stats_p);
+	else
+		return SMFIS_CONTINUE;
 
 	if(stats_p->tries < ~0)
 		stats_p->tries++;
