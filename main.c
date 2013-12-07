@@ -88,8 +88,8 @@ void stats_set(struct stats *stats_p) {
 //	rc = sqlite3_prepare_v2(db, query, -1, &stmt, NULL);
 	rc = sqlite3_exec(db, query, NULL, NULL, &errmsg);
 	if(rc != SQLITE_OK) {
-		syslog(LOG_CRIT, "Cannot update statistics in DB: %s. Exit.\n", errmsg);
-		exit(EX_SOFTWARE);
+		syslog(LOG_CRIT, "Cannot update statistics in DB: %s. Ignoring.\n", errmsg);
+//		exit(EX_SOFTWARE);
 	}
 //	sqlite3_finalize(stmt);
 	return;
